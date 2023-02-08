@@ -1,0 +1,552 @@
+
+
+import request from "request";
+import { nanoid } from 'nanoid';
+import * as crypto from 'crypto';
+import RoomModel from "../schemas/roomSchema";
+import { CONSTANTS } from "./constant";
+import { Responder } from "./responder";
+import Stripe from 'stripe';
+
+import { INotification } from "../interfaces/notification";
+import NotificationModel from "../schemas/notificationSchema";
+import { IExpense } from "../interfaces/expense";
+import ExpenseModel from "../schemas/expenseSchema";
+import ContractorModel from "../schemas/contractorSchema";
+var Config = require("./config")();
+const stripe = new Stripe(Config.SECRET_KEY, {
+    apiVersion: '2020-08-27',
+});
+const SibApiV3Sdk = require('sib-api-v3-sdk');
+let defaultClient = SibApiV3Sdk.ApiClient.instance;
+
+let apiKey = defaultClient.authentications['api-key'];
+apiKey.apiKey = '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';
+
+let apiInstance = new SibApiV3Sdk.TransactionalEmailsApi();
+let sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
+
+
+const moment = require('moment');
+var jwt = require("jsonwebtoken");
+
+
+
+class UtilsClass {
+    constructor() { }
+
+    generateId() {
+        return nanoid(10);
+    }
+    newContractorId() {
+        return "con_" + this.generateId()
+    }
+    newRefundId() {
+        return "re_" + this.generateId();
+    }
+    newExpenseId() {
+        return "ex_" + this.generateId()
+    }
+    newTransId() {
+        return "tr_" + this.generateId();
+    }
+    newInvId() {
+        return "inv_" + this.generateId();
+    }
+    newMaintenanceHisId() {
+        return "mh_" + this.generateId()
+    }
+    sendInvoiceMail = (email: any, name: any, invoice: any, amount: any) => {
+        sendSmtpEmail.to = [{ email: email }];
+        sendSmtpEmail.params = {
+            url: Config.CTR_URL + "profile/",
+            name: name,
+            invoice_id: invoice.invoice_id,
+            invoice_date: moment(invoice.createdAt).format("YYYY-MM-DD"),
+            due_amount: amount,
+        };
+        sendSmtpEmail.templateId = 5;
+        this.sendSIBMail(sendSmtpEmail)
+    }
+    dateQuery = (query: any, type: any) => {
+        let to: any = new Date(query.to);
+        to = to.setUTCHours(23, 59, 59, 99);
+        return (query[type] = {
+            $gte: new Date(query.from),
+            $lte: new Date(to),
+        });
+    };
+    returnRegexAlone = (value: any) => {
+        return {
+            $regex: new RegExp(this.replaceSearchTerm(value), "i"),
+        };
+    };
+    appendRegex = (query: any, field: any, value: any) => {
+        query[field] = this.returnRegexAlone(value);
+    };
+
+    dirCheck = (id: any) => {
+        return { $or: [{ "host.id": id }, { "manager.id": id }] };
+    };
+
+    replaceSearchTerm = (value: any) => {
+        return value.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&");
+    };
+
+    returnHostObj = (host: any) => {
+        return {
+            id: host.host_id,
+            name: host.name,
+        };
+    };
+    sendSIBMail = function (sendSmtpEmail: any) {
+        apiInstance.sendTransacEmail(sendSmtpEmail).then(function (data: any) {
+        }, function (error: any) {
+        });
+    }
+
+    createUserInKong = (username: string, acl: string, callback: any) => {
+        request.post(
+            {
+                url: Config.KONG_API,
+                form: {
+                    username: username,
+                },
+            },
+            (err, response, body) => {
+                if (body && !err) {
+                    this.assignAclGroup(username);
+                    this.generateAuthToken(username, callback);
+                } else {
+                    callback(null);
+                }
+            }
+        );
+    };
+
+    generateAuthToken = (user: string, callback: any) => {
+        request.post(
+            {
+                url: Config.KONG_API + user + "/jwt",
+                headers: {
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+            },
+            function (err, response, body) {
+                if (body) {
+                    var token = jwt.sign(
+                        {
+                            iss: JSON.parse(body).key.toString(),
+                        },
+                        JSON.parse(body).secret.toString()
+                    );
+                    callback(token);
+                } else {
+                    callback(null);
+                }
+            }
+        );
+    };
+
+    assignAclGroup = (user: string) => {
+        request.post({
+            url: Config.KONG_API + user + "/acls",
+            form: {
+                group: user,
+            },
+        });
+    };
+
+    createHashPwd = (pwd: string) => {
+        return crypto.createHash("md5").update(pwd).digest("hex");
+    };
+
+
+    linkBankInStripe = (body: any, host: any, res: any) => {
+        stripe.accountLinks
+            .create({
+                account: host.stripe.acc_id,
+                refresh_url: body.refresh_url,
+                return_url: body.return_url,
+                type: "account_onboarding",
+            })
+            .then((newResult: any) => {
+                Responder.sendSuccessData(
+                    { link: newResult.url },
+                    "Bank account session",
+                    res
+                );
+            })
+            .catch((e: any) => {
+                console.log("ERROR ::::::" + e);
+                Responder.sendFailureMessage("Could not create session", res);
+            });
+    };
+
+
+    getUserId = (req: any) => {
+        let userId = req["headers"]["x-consumer-username"];
+        return userId.substring(userId.indexOf("_") + 1);
+    };
+
+    returnPage = (query: any) => {
+        return query.page ? parseInt(query.page) : 1;
+    }
+
+    returnLimit = (query: any) => {
+        return query.limit ? parseInt(query.limit) : 10;
+    }
+
+    returnLookup = () => {
+        return {
+            from: "rooms",
+            localField: "property_id",
+            foreignField: "property_id",
+            as: "room_price",
+            pipeline: [
+                {
+                    $project: {
+                        _id: 0,
+                        price: 1,
+                    }
+                },
+                {
+                    $group: {
+                        _id: "$_id",
+                        min: { $min: "$price" },
+                        max: { $max: "$price" }
+                    }
+                }
+            ],
+        };
+    }
+
+    returnProject = () => {
+        return {
+            _id: 0, createdAt: 0, updatedAt: 0, __v: 0, late_fee: 0,
+            policy: 0, house_rules: 0, notice_period: 0,
+        }
+    }
+
+    sendMail = (body: any, cb: any) => {
+        request({
+            url: "https://api.sendinblue.com/v3/smtp/email",
+            method: "POST",
+            headers: { "api-key": CONSTANTS.SIB_KEY, "Content-Type": "application/json" },
+            body: body,
+            json: true
+        }, (err, response, result) => {
+            try {
+                if (result) {
+                    return cb(JSON.parse(result));
+                }
+            } catch (e) {
+                return cb(result);
+            }
+            cb(result)
+        });
+    }
+
+    statussendMail = async (host: any, manager: any, contractor: any, type: any) => {
+        let to = [{ "email": host.email }]
+        manager.email ? to.push(manager.email) : ""
+        let subject: any = ""
+        let textContent: any = ""
+        if ("rejected" === type) {
+            subject = "Contractor rejected the request ,Please reassign another contractor";
+            textContent = 'Request has been rejected';
+        } else if ("accepted" === type) {
+            subject = "Contractor accepted the request";
+            textContent = 'Request has been accepted';
+        } else if ("in_progress" === type) {
+            subject = "Request In Progress";
+            textContent = 'Request has been in progress mode';
+        } else {
+            subject = "Request Completed";
+            textContent = 'Request has been completed';
+        }
+        let body = {
+            "to": to,
+            "sender": {
+                "name": contractor.name,
+                "email": contractor.email
+            },
+
+            "subject": subject,
+            "textContent": textContent
+        }
+        this.sendMail(body, (cb: any) => { })
+    }
+    resetpasssendMail = (email: any, name: any, token: any) => {
+        let url = Config.CTR_URL + "reset_pwd/" + token
+        let body = {
+            "to": [
+                {
+                    "email": email
+                }
+            ],
+            "sender": {
+                "name": "Parknstays",
+                "email": "noreply@parknstays.com"
+            },
+            "textContent": `Hi ${name},<br/><br/>
+            You have requested to reset your Parknstays Contractor Password. Please click the link below to reset now.<br/><br/>
+            ${url}<br/><br/>
+            Team,<br/>
+            Parknstays`,
+            "subject": "Reset Password"
+        }
+        this.sendMail(body, (cb: any) => { })
+    }
+
+    returnUserObj = (user: any) => {
+        return {
+            id: user.user_id,
+            name: {
+                first: user.name.first,
+                last: user.name.last
+            }
+        };
+    }
+
+    returnPropObj = (property: any) => {
+        return {
+            "name": property.name,
+            "id": property.property_id,
+            "rental_type": property.rental_type
+        }
+    }
+
+    createstatusNotification = async (type: any, status: any,) => {
+
+        let data: any = {};
+
+        let message = '';
+        let title = ""
+        if ("rejected" === status) {
+            title = "Contractor rejected the request ,Please reassign another contractor";
+            message = 'Request has been rejected';
+        } else if ("accepted" === status) {
+            title = "Contractor accepted the request";
+            message = 'Request has been accepted';
+        } else if ("in_progress" === status) {
+            title = "Request In Progress";
+            message = 'Request has been in progress mode';
+        } else {
+            title = "Request Completed";
+            message = 'Request has been completed';
+        }
+
+        data["users"] = type.user ? [type.user.id] : []
+        data['title'] = title
+        data['message'] = message
+        data['type'] = "request";
+        data['notification_id'] = Utils.generateId();
+        data["host"] = type.host
+        data["manager"] = type.manager ? type.manager : {}
+        data["message"] = message
+        data["title"] = title
+
+        let notification: INotification = new NotificationModel(data);
+        notification.save();
+    }
+
+    createSession = async (body: any, property: any, description: any, res: any) => {
+        stripe.checkout.sessions.create({
+            success_url: body.success_url,
+            cancel_url: body.cancel_url,
+            payment_method_types: ['card'],
+            line_items: [{
+                quantity: 1,
+                currency: "USD",
+                amount: body.amount * 100,
+                name: property.name,
+                description: description
+            }],
+            customer_email: body.email,
+            client_reference_id: body.transaction_id,
+            metadata: body.metadata,
+            mode: 'payment',
+        }).then((result) => {
+            Responder.sendSuccessData({ link: result.url, transaction_id: body.transaction_id }, "Session", res);
+        }).catch(error => {
+            Responder.sendFailureMessage("Could not create session !", res);
+        });
+    }
+
+    addAccountInStripe = (contractor: any, callback: any) => {
+        stripe.accounts
+            .create({
+                type: "express",
+                country: "US",
+                email: contractor.email,
+                metadata: {
+                    name: contractor.name,
+                    email: contractor.email,
+                    contractor_id: contractor.contractor_id
+                },
+                settings: {
+                    payouts: {
+                        schedule: {
+                            interval: "monthly",
+                            monthly_anchor: 1,
+                        },
+                    },
+                },
+            })
+            .then(async (result: any) => {
+                callback(result);
+            })
+            .catch((e: any) => {
+                callback(null);
+            });
+    }
+    transferFund = (payout: any, contractor: any, callback: any) => {
+        stripe.transfers.create({
+            amount: payout.amount * 100,
+            currency: "usd",
+            destination: contractor.stripe.acc_id,
+            description: "Testing",
+            metadata: {
+                host_id: contractor.contractor_id,
+                name: contractor.name,
+                payout_id: payout.payout_id
+            }
+        }).then((newResult: any) => {
+            callback(newResult);
+        }).catch((e: any) => {
+            console.log("ERROR ::::::" + e)
+        });
+    }
+
+    stripeRefund = (refund: any) => {
+        stripe.refunds.create({
+            payment_intent: refund.stripe_pay_id,
+            amount: refund.amount * 100,
+            metadata: {
+                refund_id: refund.refund_id,
+                booking_id: refund.booking_id,
+                stripe_pay_id: refund.stripe_pay_id
+            }
+        })
+    }
+
+    lastMonthQuery = {
+
+        "$gte": new Date(moment().startOf('month').subtract(1, 'months').format('YYYY-MM-DD')),
+        "$lte": new Date(moment().endOf('month').subtract(1, 'months').format('YYYY-MM-DD'))
+    }
+    thisMonthQuery = {
+        "$gte": new Date(moment().startOf('month').format('YYYY-MM-DD')),
+        "$lte": new Date(moment().endOf('month').format('YYYY-MM-DD'))
+    }
+
+    returnDueDate = (lateFee: any) => {
+        let dueDate = new Date();
+        if (lateFee && lateFee.is_enabled && lateFee.due) {
+            dueDate.setDate(dueDate.getDate() + lateFee.due);
+        }
+        return dueDate;
+    }
+    returnDueDatefromCheckin = (lateFee: any, checkin: any) => {
+        let dueDate = new Date(checkin);
+        if (lateFee && lateFee.is_enabled && lateFee.due) {
+            dueDate.setDate(dueDate.getDate() + lateFee.due);
+        }
+        return dueDate;
+    }
+
+    returnISOStartOfCurrentMonth = () => {
+        return moment().startOf('month').toISOString()
+    }
+    returnISOEndOfCurrentMonth = () => {
+        return moment().endOf('month').toISOString()
+    }
+    returnMonthOfDate = (date: any) => {
+        return new Date(date).getMonth();
+    }
+}
+
+export const Utils = new UtilsClass();
+
+
+
+
+
+
+
+
+
+
+    linkBank = async (req: Request, res: Response) => {
+        let conId = Utils.getUserId(req);
+        let data = req.body;
+        let contractor = await ContractorModel.findOne({ "contractor_id": conId }).exec();
+        if (!contractor) Responder.sendFailureMessage("Contractor not found", res);
+        if (!data || !data.refresh_url || !data.return_url) return Responder.sendFailureMessage("Send Valid inputs", res)
+
+        if (!contractor.stripe || !contractor.stripe.acc_id) {
+            Utils.addAccountInStripe(contractor, (result: any) => {
+                if (result) {
+                    contractor.stripe = {
+                        acc_id: result.id,
+                        is_bank: false
+                    }
+                    contractor.save();
+                    Utils.linkBankInStripe(data, contractor, res)
+                }
+            })
+        } else Utils.linkBankInStripe(data, contractor, res)
+    }
+    
+    
+    
+    
+    
+        
+      PUBLIC_KEY:"pk_test_51JZIpuGqjw7fJYaWUaZehXxzFpncRQjvGRly7rXKvCZixdoiNwtolthUJdnRAgaIFditJV35s1NPn9xBnJp6iAHc004Kckj8sE",
+SECRET_KEY:"sk_test_51JZIpuGqjw7fJYaWvK9hAyKHphVWYdbXc66gaaDEDei0W8ZJU6cxw1SrgvHwB6ogZo15s4LMR4kb0UVwO4GwOxfg00dLlWiSrC"
+
+
+
+
+
+
+
+webhook = async (req: any, res: any) => {
+    const body = req.body;
+    //const signature = req.headers['stripe-signature'];
+    // console.log(req.body, signature, STRIPE_W_SEC)
+    //  let event = stripe.webhooks.constructEvent(req.rawBody, signature, STRIPE_W_SEC);
+    // if ("account.updated" === event.type && body.data && body.data.object) {
+    if ("account.updated" === body.type && body.data && body.data.object) {
+      let bankObj: any = {};
+      let metaData = body.data.object.metadata;
+      bankObj["is_bank"] = true;
+      bankObj["acc_id"] = body.account;
+      let detail = body.data.object.external_accounts;
+      if (detail.data && detail.data[0]) {
+        let bankData = detail.data[0];
+        bankObj["name"] = bankData.bank_name;
+        bankObj["route_number"] = bankData.routing_number;
+        bankObj["ac_number"] = "*******" + bankData.last4;
+      }
+      HostModel.findOneAndUpdate(
+        {
+          $or: [
+            { host_id: metaData.host_id },
+            { manager_id: metaData.host_id },
+          ],
+        },
+        { stripe: bankObj },
+        function (err: any, result: any) { }
+      );
+    } else {
+      console.log("Could not update:: EventTYP:" + body.type);
+    }
+  };
+}
+
+
+
+
