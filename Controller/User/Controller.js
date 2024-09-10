@@ -106,6 +106,7 @@ function Controller() {
     this.getuser = async function (req, res) {
 
         User.find({}, (err, user) => {
+            console.log("coming::::::::")
             if (user) return Responder.sendSuccessData('Users', user, res)
             else Responder.sendFailureMessage("Can not find users", res)
         })
