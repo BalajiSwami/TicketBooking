@@ -1,5 +1,5 @@
 const mongoose = require('mongoose')
-const uri = 'mongodb://localhost:27017/Ticket_Booking'
+const uri = 'mongodb+srv://balajis4580:gf08V9P8eigjC0jZ@ticketbooking.6g4lz.mongodb.net/'
 
 function Connection(){
 
