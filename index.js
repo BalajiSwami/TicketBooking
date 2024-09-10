@@ -25,5 +25,5 @@ app.use('/screen', require('./Controller/Screen/Router'))
 app.use('/rating', require('./Controller/Rating/Router'))
 
 app.listen(PORT, () => {
-    console.log("PORT RUNNING....")
+    console.log("PORT RUNNING....!!!!!!!!")
 })
